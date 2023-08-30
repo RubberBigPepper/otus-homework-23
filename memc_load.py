@@ -14,6 +14,9 @@ import appsinstalled_pb2
 # pip install python-memcached
 import memcache
 import typing as tp
+from multiprocessing.dummy import Pool as ThreadPool
+from functools import partial
+
 
 NORMAL_ERR_RATE = 0.01
 AppsInstalled = collections.namedtuple("AppsInstalled", ["dev_type", "dev_id", "lat", "lon", "apps"])
@@ -114,8 +117,15 @@ def main(options):
         "adid": options.adid,
         "dvid": options.dvid,
     }
-    for filename in glob.iglob(options.pattern):
-        process_file(filename, options, device_memc)
+    MAX_THREADS = 4
+
+    pool = ThreadPool(MAX_THREADS)
+    pool.map(partial(process_file, options=options, device_memc=device_memc), glob.iglob(options.pattern))
+    pool.close()
+    pool.join()
+
+    #for filename in glob.iglob(options.pattern):
+     #   process_file(filename, options, device_memc)
 
 
 def prototest():
