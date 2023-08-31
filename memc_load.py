@@ -16,10 +16,19 @@ import memcache
 import typing as tp
 from multiprocessing.dummy import Pool as ThreadPool
 from functools import partial
+from enum import Enum
 
-MAX_THREADS = 8
+
+MAX_FILE_THREADS = 2  # максимальное число потоков перебора файлов
+MAX_LINE_THREADS = 4  # максимальное число потоков перебора строк в одном файле
 NORMAL_ERR_RATE = 0.01
 AppsInstalled = collections.namedtuple("AppsInstalled", ["dev_type", "dev_id", "lat", "lon", "apps"])
+
+
+class HandleLineResult(Enum):
+    SKIP = -1
+    OK = 0
+    ERROR = 1
 
 
 def dot_rename(path: str):
@@ -72,18 +81,28 @@ def make_reader(filename: str):
     return gzip.open(filename, "rt") if filename.lower().endswith(".gz") else open(filename)
 
 
-def handle_line(line: str, options: tp.Any, device_memc:tp.Dict[str, tp.Any]) -> bool:
+def handle_line(line: str, options: tp.Any, device_memc: tp.Dict[str, tp.Any]) -> HandleLineResult:
+    line = line.strip()
+    if not line:
+        return HandleLineResult.SKIP
     appsinstalled = parse_appsinstalled(line)
     if not appsinstalled:
-        return False
+        return HandleLineResult.ERROR
     memc_addr = device_memc.get(appsinstalled.dev_type)
     if not memc_addr:
         logging.error("Unknown device type: %s" % appsinstalled.dev_type)
-        return False
-    return insert_appsinstalled(memc_addr, appsinstalled, options.dry)
+        return HandleLineResult.ERROR
+    return HandleLineResult.OK if insert_appsinstalled(memc_addr, appsinstalled,
+                                                       options.dry) else HandleLineResult.ERROR
 
 
-def calculate_raiting(processed: int, errors: int) -> None:
+def calculate_raiting(results: tp.List[HandleLineResult]) -> None:
+    processed = errors = 0
+    for result in results:
+        if result == HandleLineResult.OK:
+            processed += 1
+        elif HandleLineResult.ERROR:
+            errors += 1
     if not processed:
         return
     err_rate = float(errors) / processed
@@ -93,24 +112,19 @@ def calculate_raiting(processed: int, errors: int) -> None:
         logging.error("High error rate (%s > %s). Failed load" % (err_rate, NORMAL_ERR_RATE))
 
 
-def process_file(filename: str, options: tp.Any, device_memc:tp.Dict[str, tp.Any]) -> None:
-    processed = errors = 0
+def process_file(filename: str, options: tp.Any, device_memc: tp.Dict[str, tp.Any]) -> None:
     logging.info('Processing %s' % filename)
     with make_reader(filename) as fd:
-        for line in fd:
-            line = line.strip()
-            if not line:
-                continue
-            if handle_line(line, options, device_memc):
-                processed += 1
-            else:
-                errors += 1
+        pool = ThreadPool(MAX_LINE_THREADS)
+        results = pool.map(partial(handle_line, options=options, device_memc=device_memc), fd)
+        pool.close()
+        pool.join()
 
     dot_rename(filename)
-    calculate_raiting(processed, errors)
+    calculate_raiting(results)
 
 
-def main(options: tp.Any, max_threads: int = MAX_THREADS):
+def main(options: tp.Any, max_threads: int = MAX_FILE_THREADS):
     device_memc = {
         "idfa": options.idfa,
         "gaid": options.gaid,
