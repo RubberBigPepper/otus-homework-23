@@ -17,7 +17,7 @@ import typing as tp
 from multiprocessing.dummy import Pool as ThreadPool
 from functools import partial
 
-
+MAX_THREADS = 8
 NORMAL_ERR_RATE = 0.01
 AppsInstalled = collections.namedtuple("AppsInstalled", ["dev_type", "dev_id", "lat", "lon", "apps"])
 
@@ -69,7 +69,7 @@ def parse_appsinstalled(line: str):
 
 
 def make_reader(filename: str):
-    return gzip.open(filename) if filename.lower().endswith(".gz") else open(filename)
+    return gzip.open(filename, "rt") if filename.lower().endswith(".gz") else open(filename)
 
 
 def handle_line(line: str, options: tp.Any, device_memc:tp.Dict[str, tp.Any]) -> bool:
@@ -106,26 +106,22 @@ def process_file(filename: str, options: tp.Any, device_memc:tp.Dict[str, tp.Any
             else:
                 errors += 1
 
-    # dot_rename(filename)
+    dot_rename(filename)
     calculate_raiting(processed, errors)
 
 
-def main(options):
+def main(options: tp.Any, max_threads: int = MAX_THREADS):
     device_memc = {
         "idfa": options.idfa,
         "gaid": options.gaid,
         "adid": options.adid,
         "dvid": options.dvid,
     }
-    MAX_THREADS = 4
-
-    pool = ThreadPool(MAX_THREADS)
-    pool.map(partial(process_file, options=options, device_memc=device_memc), glob.iglob(options.pattern))
+    files_to_work = sorted(glob.iglob(options.pattern))
+    pool = ThreadPool(max_threads)
+    pool.map(partial(process_file, options=options, device_memc=device_memc), files_to_work)
     pool.close()
     pool.join()
-
-    #for filename in glob.iglob(options.pattern):
-     #   process_file(filename, options, device_memc)
 
 
 def prototest():
