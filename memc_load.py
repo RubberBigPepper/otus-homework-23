@@ -1,11 +1,13 @@
 #!/usr/bin/env python
 # -*- coding: utf-8 -*-
+import io
 import os
 import gzip
 import sys
 import glob
 import logging
 import collections
+import threading
 from optparse import OptionParser
 # brew install protobuf
 # protoc  --python_out=. ./appsinstalled.proto
@@ -18,9 +20,8 @@ from multiprocessing.dummy import Pool as ThreadPool
 from functools import partial
 from enum import Enum
 
-
 MAX_FILE_THREADS = 2  # максимальное число потоков перебора файлов
-MAX_LINE_THREADS = 4  # максимальное число потоков перебора строк в одном файле
+MAX_LINE_THREADS = 8  # максимальное число потоков перебора строк в одном файле
 NORMAL_ERR_RATE = 0.01
 AppsInstalled = collections.namedtuple("AppsInstalled", ["dev_type", "dev_id", "lat", "lon", "apps"])
 
@@ -31,13 +32,25 @@ class HandleLineResult(Enum):
     ERROR = 1
 
 
-def dot_rename(path: str):
+class MemcachedClientMT:
+    _cashed = {}
+    _lock = threading.RLock()
+
+    @staticmethod
+    def get_client(address: str) -> memcache.Client:
+        with MemcachedClientMT._lock:
+            if address not in MemcachedClientMT._cashed:
+                MemcachedClientMT._cashed[address] = memcache.Client([address])
+            return MemcachedClientMT._cashed[address]
+
+
+def dot_rename(path: str) -> None:
     head, fn = os.path.split(path)
     # atomic in most cases
     os.rename(path, os.path.join(head, "." + fn))
 
 
-def insert_appsinstalled(memc_addr, appsinstalled, dry_run=False):
+def insert_appsinstalled(memc_addr: str, appsinstalled: AppsInstalled, dry_run: bool = False) -> bool:
     ua = appsinstalled_pb2.UserApps()
     ua.lat = appsinstalled.lat
     ua.lon = appsinstalled.lon
@@ -50,7 +63,7 @@ def insert_appsinstalled(memc_addr, appsinstalled, dry_run=False):
         if dry_run:
             logging.debug("%s - %s -> %s" % (memc_addr, key, str(ua).replace("\n", " ")))
         else:
-            memc = memcache.Client([memc_addr])
+            memc = MemcachedClientMT.get_client(memc_addr)
             memc.set(key, packed)
     except Exception as e:
         logging.exception("Cannot write to memc %s: %s" % (memc_addr, e))
@@ -58,13 +71,13 @@ def insert_appsinstalled(memc_addr, appsinstalled, dry_run=False):
     return True
 
 
-def parse_appsinstalled(line: str):
+def parse_appsinstalled(line: str) -> tp.Optional[AppsInstalled]:
     line_parts = line.strip().split("\t")
     if len(line_parts) < 5:
-        return
+        return None
     dev_type, dev_id, lat, lon, raw_apps = line_parts
     if not dev_type or not dev_id:
-        return
+        return None
     try:
         apps = [int(a.strip()) for a in raw_apps.split(",")]
     except ValueError:
